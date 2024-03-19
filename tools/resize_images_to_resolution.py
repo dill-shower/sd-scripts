@@ -94,8 +94,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 def resize_images(src_img_folder, dst_img_folder, max_resolution="512x512", divisible_by=2, interpolation=None, save_as_png=False, copy_associated_files=False):
-  # ... (предыдущий код остается без изменений)
-
+  
   # Iterate through all files in src_img_folder
   img_exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp")                   # copy from train_util.py
   for filename in os.listdir(src_img_folder):
