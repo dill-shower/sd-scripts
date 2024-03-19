@@ -80,14 +80,57 @@ def resize_images(src_img_folder, dst_img_folder, max_resolution="512x512", divi
       # Split filename into base and extension
       new_filename = base + '+' + max_resolution + ('.png' if save_as_png else '.jpg')
 
-      # Save resized image in dst_img_folder
-      # cv2.imwrite(os.path.join(dst_img_folder, new_filename), img, [cv2.IMWRITE_JPEG_QUALITY, 100])
-      image = Image.fromarray(img)
-      image.save(os.path.join(dst_img_folder, new_filename), quality=100)
+import glob
+import os
+import cv2
+import argparse
+import shutil
+import math
+from PIL import Image
+import numpy as np
+from library.utils import setup_logging
+setup_logging()
+import logging
+logger = logging.getLogger(__name__)
 
-      proc = "Resized" if current_pixels > max_pixels else "Saved"
-      logger.info(f"{proc} image: {filename} with size {img.shape[0]}x{img.shape[1]} as {new_filename}")
+def resize_images(src_img_folder, dst_img_folder, max_resolution="512x512", divisible_by=2, interpolation=None, save_as_png=False, copy_associated_files=False):
+  # ... (предыдущий код остается без изменений)
 
+  # Iterate through all files in src_img_folder
+  img_exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp")                   # copy from train_util.py
+  for filename in os.listdir(src_img_folder):
+    # Check if the image is png, jpg or webp etc...
+    if not filename.endswith(img_exts):
+      # Copy the file to the destination folder if not png, jpg or webp etc (.txt or .caption or etc.)
+      shutil.copy(os.path.join(src_img_folder, filename), os.path.join(dst_img_folder, filename))
+      continue
+
+    # Load image
+    image = Image.open(os.path.join(src_img_folder, filename))
+    if not image.mode == "RGB":
+      image = image.convert("RGB")
+    img = np.array(image, np.uint8)
+
+    base, _ = os.path.splitext(filename)
+    for max_resolution in max_resolutions:
+      # ... (код для изменения размера изображения остается без изменений)
+
+      # Split filename into base and extension
+      new_filename = base + '+' + max_resolution + ('.png' if save_as_png else '.jpg')
+
+      # Compare the size of the original and resized images
+      original_size = os.path.getsize(os.path.join(src_img_folder, filename))
+      resized_image = Image.fromarray(img)
+      resized_image.save(os.path.join(dst_img_folder, new_filename), quality=100)
+      resized_size = os.path.getsize(os.path.join(dst_img_folder, new_filename))
+
+      if original_size < resized_size:
+        # If the original image is smaller, copy it instead of the resized image
+        shutil.copy(os.path.join(src_img_folder, filename), os.path.join(dst_img_folder, new_filename))
+        logger.info(f"Copied original image: {filename} as {new_filename} (original size: {original_size} bytes, resized size: {resized_size} bytes)")
+      else:
+        logger.info(f"Saved resized image: {filename} with size {img.shape[0]}x{img.shape[1]} as {new_filename}")
+  
     # If other files with same basename, copy them with resolution suffix
     if copy_associated_files:
       asoc_files = glob.glob(os.path.join(src_img_folder, base + ".*"))
