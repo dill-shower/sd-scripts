@@ -193,24 +193,63 @@ def str_to_dtype(s: Optional[str], default_dtype: Optional[torch.dtype] = None) 
 
 # region Image utils
 
+# Gamma correction lookup tables (initialized once on first use)
+_SRGB_TO_LINEAR_LUT = np.array([
+    x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4
+    for x in np.linspace(0, 1, 256)
+], dtype=np.float32)
+
+_LINEAR_TO_SRGB_LUT = np.array([
+    x * 12.92 if x <= 0.0031308 else 1.055 * (x ** (1/2.4)) - 0.055
+    for x in np.linspace(0, 1, 4096)
+], dtype=np.float32)
+
 
 def pil_resize(image, size, interpolation):
+    """Resize with gamma correction for accurate color handling"""
     has_alpha = image.shape[2] == 4 if len(image.shape) == 3 else False
 
     if has_alpha:
-        pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA))
+        # Split channels
+        bgr = image[:, :, :3]
+        alpha = image[:, :, 3]
+        
+        # Convert BGR to RGB and apply gamma correction
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        linear_rgb = _SRGB_TO_LINEAR_LUT[rgb]
+        
+        # Resize in linear space
+        pil_linear = Image.fromarray((linear_rgb * 255).astype(np.uint8))
+        resized_linear = pil_linear.resize(size, resample=interpolation)
+        
+        # Convert back to sRGB
+        linear_array = np.array(resized_linear).astype(np.float32) / 255.0
+        indices = np.clip(linear_array * 4095, 0, 4095).astype(np.int32)
+        rgb_srgb = (_LINEAR_TO_SRGB_LUT[indices] * 255).astype(np.uint8)
+        
+        # Resize alpha separately (no gamma correction needed)
+        alpha_pil = Image.fromarray(alpha)
+        alpha_resized = np.array(alpha_pil.resize(size, resample=interpolation))
+        
+        # Convert back to BGR and merge
+        bgr_resized = cv2.cvtColor(rgb_srgb, cv2.COLOR_RGB2BGR)
+        return np.dstack([bgr_resized, alpha_resized])
     else:
-        pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-
-    resized_pil = pil_image.resize(size, resample=interpolation)
-
-    # Convert back to cv2 format
-    if has_alpha:
-        resized_cv2 = cv2.cvtColor(np.array(resized_pil), cv2.COLOR_RGBA2BGRA)
-    else:
-        resized_cv2 = cv2.cvtColor(np.array(resized_pil), cv2.COLOR_RGB2BGR)
-
-    return resized_cv2
+        # Convert BGR to RGB and apply gamma correction
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        linear_rgb = _SRGB_TO_LINEAR_LUT[rgb]
+        
+        # Resize in linear space
+        pil_linear = Image.fromarray((linear_rgb * 255).astype(np.uint8))
+        resized_linear = pil_linear.resize(size, resample=interpolation)
+        
+        # Convert back to sRGB
+        linear_array = np.array(resized_linear).astype(np.float32) / 255.0
+        indices = np.clip(linear_array * 4095, 0, 4095).astype(np.int32)
+        rgb_srgb = (_LINEAR_TO_SRGB_LUT[indices] * 255).astype(np.uint8)
+        
+        # Convert back to BGR
+        return cv2.cvtColor(rgb_srgb, cv2.COLOR_RGB2BGR)
 
 
 def resize_image(
@@ -222,7 +261,8 @@ def resize_image(
     resize_interpolation: Optional[str] = None,
 ):
     """
-    Resize image with resize interpolation. Default interpolation to AREA if image is smaller, else LANCZOS.
+    Resize image with gamma-correct interpolation for accurate color handling.
+    All resizing is now performed in linear RGB space for better quality.
 
     Args:
         image: numpy.ndarray
@@ -252,14 +292,45 @@ def resize_image(
     use_pil = resize_interpolation in ["lanczos", "lanczos4", "box"]
 
     resized_size = (resized_width, resized_height)
+    
     if use_pil:
         interpolation = get_pil_interpolation(resize_interpolation)
         image = pil_resize(image, resized_size, interpolation=interpolation)
-        logger.debug(f"resize image using {resize_interpolation} (PIL)")
+        logger.debug(f"gamma-correct resize using {resize_interpolation} (PIL)")
     else:
-        interpolation = get_cv2_interpolation(resize_interpolation)
-        image = cv2.resize(image, resized_size, interpolation=interpolation)
-        logger.debug(f"resize image using {resize_interpolation} (cv2)")
+        # Gamma-correct resize with cv2
+        has_alpha = image.shape[2] == 4 if len(image.shape) == 3 else False
+        
+        if has_alpha:
+            bgr = image[:, :, :3]
+            alpha = image[:, :, 3:4]
+            
+            # sRGB to Linear
+            linear_bgr = _SRGB_TO_LINEAR_LUT[bgr]
+            
+            # Resize in linear space
+            interpolation = get_cv2_interpolation(resize_interpolation)
+            linear_resized = cv2.resize(linear_bgr, resized_size, interpolation=interpolation)
+            alpha_resized = cv2.resize(alpha, resized_size, interpolation=interpolation)
+            
+            # Linear to sRGB
+            indices = np.clip(linear_resized * 4095, 0, 4095).astype(np.int32)
+            bgr_resized = (_LINEAR_TO_SRGB_LUT[indices] * 255).astype(np.uint8)
+            
+            image = np.dstack([bgr_resized, alpha_resized])
+        else:
+            # sRGB to Linear
+            linear = _SRGB_TO_LINEAR_LUT[image]
+            
+            # Resize in linear space
+            interpolation = get_cv2_interpolation(resize_interpolation)
+            linear_resized = cv2.resize(linear, resized_size, interpolation=interpolation)
+            
+            # Linear to sRGB
+            indices = np.clip(linear_resized * 4095, 0, 4095).astype(np.int32)
+            image = (_LINEAR_TO_SRGB_LUT[indices] * 255).astype(np.uint8)
+        
+        logger.debug(f"gamma-correct resize using {resize_interpolation} (cv2)")
 
     return image
 
@@ -318,7 +389,7 @@ def get_pil_interpolation(interpolation: Optional[str]) -> Optional[Image.Resamp
     elif interpolation == "area":
         # Image.Resampling.BOX may be more appropriate if upscaling
         # Area interpolation is related to cv2.INTER_AREA
-        # Produces a sharper image than Resampling.BILINEAR, doesn’t have dislocations on local level like with Resampling.BOX.
+        # Produces a sharper image than Resampling.BILINEAR, doesn't have dislocations on local level like with Resampling.BOX.
         return Image.Resampling.HAMMING
     elif interpolation == "box":
         # Each pixel of source image contributes to one pixel of the destination image with identical weights. For upscaling is equivalent of Resampling.NEAREST.
