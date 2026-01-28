@@ -6679,3 +6679,10 @@ class LossRecorder:
         if losses == 0:
             return 0
         return self.loss_total / losses
+
+try:
+    from library.mldb_dataset import enable_mldb_support
+    enable_mldb_support()
+except ImportError:
+    pass  # mldb_dataset not available, skip
+
