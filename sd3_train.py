@@ -30,6 +30,7 @@ from library.sdxl_train_util import match_mixed_precision
 import library.train_util as train_util
 
 from library.utils import setup_logging, add_logging_arguments
+from contextlib import nullcontext
 
 setup_logging()
 import logging
@@ -747,7 +748,7 @@ def train(args):
             if args.blockwise_fused_optimizers:
                 optimizer_hooked_count = {i: 0 for i in range(len(optimizers))}  # reset counter for each step
 
-            with accelerator.accumulate(*training_models):
+            with (nullcontext() if args.deepspeed else accelerator.accumulate(*training_models)):
                 if "latents" in batch and batch["latents"] is not None:
                     latents = batch["latents"].to(accelerator.device, dtype=weight_dtype)
                 else:
