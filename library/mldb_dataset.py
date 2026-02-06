@@ -44,7 +44,7 @@ except ImportError:
 # ============================================================================
 
 MLDB_PREFIX = "mldb://"
-_readers: Dict[str, Any] = {}
+_readers: Dict[Tuple[str, int], Any] = {}  # (path, pid) → reader
 _discovery_cache: Dict[str, List[str]] = {}
 _patches_installed = False
 _originals = {}
@@ -70,18 +70,21 @@ def make_mldb_path(mldb_dir: str, index: int) -> str:
 
 def get_reader(mldb_dir: str):
     mldb_dir = os.path.normpath(os.path.abspath(mldb_dir))
-    if mldb_dir not in _readers:
-        logger.info(f"Opening MLDB: {mldb_dir}")
-        _readers[mldb_dir] = MLDBReader(mldb_dir, use_mmap=True)
-    return _readers[mldb_dir]
+    key = (mldb_dir, os.getpid())
+    if key not in _readers:
+        logger.info(f"Opening MLDB: {mldb_dir} (pid={os.getpid()})")
+        _readers[key] = MLDBReader(mldb_dir, use_mmap=True)
+    return _readers[key]
 
 def close_readers():
-    for r in _readers.values():
+    pid = os.getpid()
+    to_close = [k for k in _readers if k[1] == pid]
+    for k in to_close:
         try:
-            r.close()
-        except:
+            _readers[k].close()
+        except Exception:
             pass
-    _readers.clear()
+        del _readers[k]
     _discovery_cache.clear()
 
 # ============================================================================
@@ -94,14 +97,14 @@ def find_mldb_datasets(root_dir: str) -> List[str]:
     root_dir = os.path.normpath(os.path.abspath(root_dir))
     if root_dir in _discovery_cache:
         return _discovery_cache[root_dir]
-    
+
     datasets = []
     root = Path(root_dir)
     if root.exists() and root.is_dir():
         for manifest in root.rglob("manifest.json"):
             if (manifest.parent / "tag_index.json").exists():
                 datasets.append(str(manifest.parent.absolute()))
-    
+
     _discovery_cache[root_dir] = datasets
     return datasets
 
@@ -157,8 +160,9 @@ class _JXLBits:
             if self.idx < len(self.offsets):
                 self.pos = self.offsets[self.idx][1]
 
+
 def _jxl_decode_size(bits: _JXLBits) -> Tuple[int, int]:
-    bits.get(16)  # signature
+    bits.get(16)
     div8 = bits.get(1)
     if div8:
         h = 8 * (1 + bits.get(5))
@@ -172,43 +176,43 @@ def _jxl_decode_size(bits: _JXLBits) -> Tuple[int, int]:
         d = bits.get(2)
         w = 1 + bits.get([9, 13, 18, 30][d])
     else:
-        w = [h, h, h*12//10, h*4//3, h*3//2, h*16//9, h*5//4, h*2][ratio]
+        w = [h, h, h * 12 // 10, h * 4 // 3, h * 3 // 2, h * 16 // 9, h * 5 // 4, h * 2][ratio]
     return w, h
+
 
 def get_jxl_size_from_bytes(data: bytes) -> Tuple[int, int]:
     if data[:2] == b'\xff\x0a':
         return _jxl_decode_size(_JXLBits(data))
-    
-    # Container format
+
     if data[:12] != bytes.fromhex("0000000C4A584C200D0A870A"):
         raise ValueError("Invalid JXL signature")
     if data[12:32] != bytes.fromhex("000000146674796A786C20000000006A786C20"):
         raise ValueError("Invalid JXL ftyp")
-    
+
     ptr = 32
     offset = 0
     offsets = []
     file_size = len(data)
-    
+
     while ptr < file_size:
-        lbox = int.from_bytes(data[ptr:ptr+4], "big")
+        lbox = int.from_bytes(data[ptr:ptr + 4], "big")
         if lbox == 1:
-            xlbox = int.from_bytes(data[ptr+8:ptr+16], "big")
+            xlbox = int.from_bytes(data[ptr + 8:ptr + 16], "big")
             hdr_len, box_len = 16, xlbox
         elif lbox == 0:
             hdr_len, box_len = 8, file_size - ptr
         else:
             hdr_len, box_len = 8, lbox
-        
-        box_type = data[ptr+4:ptr+8]
+
+        box_type = data[ptr + 4:ptr + 8]
         if box_type == b'jxlc':
             offset = ptr + hdr_len
             break
         elif box_type == b'jxlp':
-            idx = int.from_bytes(data[ptr+hdr_len:ptr+hdr_len+4], "big")
+            idx = int.from_bytes(data[ptr + hdr_len:ptr + hdr_len + 4], "big")
             offsets.append([idx, ptr + hdr_len + 4, box_len - hdr_len - 4])
         ptr += box_len
-    
+
     if offsets:
         offsets.sort(key=lambda x: x[0])
     return _jxl_decode_size(_JXLBits(data, offset, offsets if offsets else None))
@@ -218,45 +222,45 @@ def get_jxl_size_from_bytes(data: bytes) -> Tuple[int, int]:
 # ============================================================================
 
 def get_mldb_image_size(mldb_dir: str, index: int) -> Tuple[int, int]:
-    """Получить размер из MLDB: meta → imagesize → JXL decoder → PIL"""
+    """Получить размер: meta → imagesize(BytesIO) → JXL decoder → PIL"""
     try:
         reader = get_reader(mldb_dir)
         meta = reader.get_meta(index)
         if meta is None:
             return (512, 512)
-        
+
         # 1. Из метаданных
         if meta.width > 0 and meta.height > 0:
             return (meta.width, meta.height)
-        
+
         # 2. Нужно загрузить данные
         record = reader[index]
         data = record.image_data
         fmt = (meta.format or "").lower()
-        
+
         # 3. JXL — специальный декодер
         if fmt == "jxl":
             try:
                 return get_jxl_size_from_bytes(data)
-            except:
+            except Exception:
                 pass
-        
-        # 4. imagesize
+
+        # 4. imagesize через BytesIO (быстрее PIL, не декодирует пиксели)
         try:
             import imagesize
-            w, h = imagesize.get_from_bytes(data)
+            w, h = imagesize.get(io.BytesIO(data))
             if w > 0 and h > 0:
                 return (w, h)
-        except:
+        except Exception:
             pass
-        
+
         # 5. PIL fallback
         try:
             with Image.open(io.BytesIO(data)) as img:
                 return img.size
-        except:
+        except Exception:
             pass
-        
+
         return (512, 512)
     except Exception as e:
         logger.warning(f"get_mldb_image_size failed: {mldb_dir}#{index}: {e}")
@@ -271,9 +275,11 @@ def load_mldb_image(mldb_dir: str, index: int, alpha: bool = False) -> np.ndarra
     record = reader[index]
     img = Image.open(io.BytesIO(record.image_data))
     if alpha:
-        img = img.convert("RGBA") if img.mode != "RGBA" else img
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
     else:
-        img = img.convert("RGB") if img.mode != "RGB" else img
+        if img.mode != "RGB":
+            img = img.convert("RGB")
     return np.array(img, np.uint8)
 
 # ============================================================================
@@ -286,11 +292,13 @@ def _patched_load_image(image_path: str, alpha: bool = False) -> np.ndarray:
         return load_mldb_image(d, i, alpha)
     return _originals['load_image'](image_path, alpha)
 
+
 def _patched_get_image_size(self, image_path: str) -> Tuple[int, int]:
     if is_mldb_path(image_path):
         d, i = parse_mldb_path(image_path)
         return get_mldb_image_size(d, i)
     return _originals['get_image_size'](self, image_path)
+
 
 def _patched_glob_images(directory: str, base: str = "*") -> List[str]:
     mldb_dirs = get_mldb_dirs_set(directory)
@@ -299,49 +307,45 @@ def _patched_glob_images(directory: str, base: str = "*") -> List[str]:
         images = [p for p in images if not is_inside_mldb(p, mldb_dirs)]
     return images
 
+
 def _make_patched_dreambooth():
     import library.train_util as tu
     Original = _originals['DreamBoothDataset']
     ImageInfo = tu.ImageInfo
-    
+
     class MLDBDreamBoothDataset(Original):
         def __init__(self, subsets, is_training, *args, **kwargs):
             super().__init__(subsets, is_training, *args, **kwargs)
-            
+
             if not MLDB_AVAILABLE:
                 return
-            
+
             processed = set()
             added = 0
-            
+
             for subset in self.subsets:
                 if not subset.image_dir:
                     continue
-                
+
                 for mldb_dir in find_mldb_datasets(subset.image_dir):
                     if mldb_dir in processed:
                         continue
                     processed.add(mldb_dir)
-                    
+
                     try:
                         reader = get_reader(mldb_dir)
                         total = len(reader)
                         logger.info(f"  MLDB {os.path.basename(mldb_dir)}: {total:,} images")
-                        
+
                         num_repeats = subset.num_repeats if is_training else 1
                         is_reg = getattr(subset, 'is_reg', False)
-                        
-                        for idx in range(total):
-                            meta = reader.get_meta(idx)
-                            if meta is None:
-                                continue
-                            
-                            # Caption из тегов
+
+                        for idx, meta in reader.iter_meta():
                             if reader.is_untagged(meta):
                                 caption = getattr(subset, 'class_tokens', "") or ""
                             else:
                                 caption = ", ".join(reader.get_tags_by_ids(meta.tag_ids))
-                            
+
                             mldb_path = make_mldb_path(mldb_dir, idx)
                             info = ImageInfo(
                                 image_key=mldb_path,
@@ -350,29 +354,29 @@ def _make_patched_dreambooth():
                                 is_reg=is_reg,
                                 absolute_path=mldb_path
                             )
-                            
+
                             if meta.width > 0 and meta.height > 0:
                                 info.image_size = (meta.width, meta.height)
-                            
+
                             info.resize_interpolation = (
-                                subset.resize_interpolation 
+                                subset.resize_interpolation
                                 if subset.resize_interpolation else self.resize_interpolation
                             )
-                            
+
                             self.register_image(info, subset)
                             added += 1
-                            
+
                             if is_reg:
                                 self.num_reg_images += num_repeats
                             else:
                                 self.num_train_images += num_repeats
-                                
+
                     except Exception as e:
                         logger.error(f"Failed to load MLDB {mldb_dir}: {e}")
-            
+
             if added:
                 logger.info(f"Added {added:,} images from MLDB")
-    
+
     return MLDBDreamBoothDataset
 
 # ============================================================================
@@ -381,33 +385,34 @@ def _make_patched_dreambooth():
 
 def enable_mldb_support() -> bool:
     global _patches_installed
-    
+
     if _patches_installed:
         return True
     if not MLDB_AVAILABLE:
         logger.warning("mldb32 not available — MLDB support disabled")
         return False
-    
+
     try:
         import library.train_util as tu
-        
+
         _originals['load_image'] = tu.load_image
         _originals['get_image_size'] = tu.BaseDataset.get_image_size
         _originals['glob_images'] = tu.glob_images
         _originals['DreamBoothDataset'] = tu.DreamBoothDataset
-        
+
         tu.load_image = _patched_load_image
         tu.BaseDataset.get_image_size = _patched_get_image_size
         tu.glob_images = _patched_glob_images
         tu.DreamBoothDataset = _make_patched_dreambooth()
-        
+
         _patches_installed = True
         logger.info("MLDB support enabled")
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to enable MLDB: {e}")
         return False
+
 
 def disable_mldb_support():
     global _patches_installed
@@ -424,14 +429,16 @@ def disable_mldb_support():
                 tu.glob_images = v
             elif k == 'DreamBoothDataset':
                 tu.DreamBoothDataset = v
-    except:
+    except Exception:
         pass
     _originals.clear()
     close_readers()
     _patches_installed = False
 
+
 def is_mldb_enabled() -> bool:
     return _patches_installed
+
 
 import atexit
 atexit.register(close_readers)
