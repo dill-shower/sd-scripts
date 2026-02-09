@@ -362,6 +362,14 @@ def train(args):
 
     if args.gradient_checkpointing:
         mmdit.enable_gradient_checkpointing()
+    if getattr(args, 'torch_compile', False):
+        logger.info("Applying torch.compile to MMDiT...")
+        mmdit = torch.compile(
+            mmdit,
+            mode="max-autotune-no-cudagraphs",
+            dynamic=True,
+            fullgraph=False,
+        )
 
     train_mmdit = args.learning_rate != 0
     mmdit.requires_grad_(train_mmdit)
@@ -1066,6 +1074,12 @@ def setup_parser() -> argparse.ArgumentParser:
         default=None,
         help="freeze last n blocks of MM-DIT / MM-DITの最後のnブロックを凍結する",
     )
+    parser.add_argument(
+        "--torch_compile",
+        action="store_true",
+        help="Apply torch.compile to MMDiT",
+    )
+
     return parser
 
 
