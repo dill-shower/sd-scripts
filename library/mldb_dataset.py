@@ -314,8 +314,18 @@ def _make_patched_dreambooth():
     ImageInfo = tu.ImageInfo
 
     class MLDBDreamBoothDataset(Original):
-        def __init__(self, subsets, is_training, *args, **kwargs):
-            super().__init__(subsets, is_training, *args, **kwargs)
+        def __init__(self, *args, **kwargs):
+            # Извлекаем subsets до того, как parent отбросит пустые
+            if 'subsets' in kwargs:
+                all_subsets = list(kwargs['subsets'])
+            elif args:
+                all_subsets = list(args[0])
+            else:
+                all_subsets = []
+
+            is_training = kwargs.get('is_training_dataset', args[1] if len(args) > 1 else True)
+
+            super().__init__(*args, **kwargs)
 
             if not MLDB_AVAILABLE:
                 return
@@ -323,7 +333,7 @@ def _make_patched_dreambooth():
             processed = set()
             added = 0
 
-            for subset in self.subsets:
+            for subset in all_subsets:
                 if not subset.image_dir:
                     continue
 
@@ -371,6 +381,11 @@ def _make_patched_dreambooth():
                             else:
                                 self.num_train_images += num_repeats
 
+                        # Subset мог быть отброшен parent'ом — добавляем обратно
+                        if subset not in self.subsets:
+                            subset.img_count = total
+                            self.subsets.append(subset)
+
                     except Exception as e:
                         logger.error(f"Failed to load MLDB {mldb_dir}: {e}")
 
@@ -378,7 +393,6 @@ def _make_patched_dreambooth():
                 logger.info(f"Added {added:,} images from MLDB")
 
     return MLDBDreamBoothDataset
-
 # ============================================================================
 #                              PUBLIC API
 # ============================================================================
