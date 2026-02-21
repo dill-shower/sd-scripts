@@ -7,6 +7,8 @@ opencv-python==4.10.0.84
 einops==0.7.0
 # pytorch-lightning==1.9.0
 bitsandbytes
+torch
+torchvision
 lion-pytorch==0.2.3
 schedulefree==1.4
 pytorch-optimizer==3.9.0
@@ -14,6 +16,7 @@ prodigy-plus-schedule-free==1.9.2
 prodigyopt==1.1.2
 tensorboard
 safetensors==0.4.5
+pillow-jxl-plugin
 # gradio==3.16.2
 # altair==4.2.2
 # easygui==0.98.3
