@@ -1,3 +1,4 @@
+wandb
 accelerate
 transformers==4.54.1
 diffusers[torch]==0.32.1
